@@ -4,6 +4,6 @@
 #
 
 PROJECT_NAME := app-template
-
+CFLAGS += -D LOG_LOCAL_LEVEL=ESP_LOG_DEBUG
 include $(IDF_PATH)/make/project.mk
 
