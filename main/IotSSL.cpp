@@ -25,10 +25,24 @@
 extern const uint8_t server_root_cert_pem_start[] asm("_binary_server_root_cert_pem_start");
 extern const uint8_t server_root_cert_pem_end[]   asm("_binary_server_root_cert_pem_end");
 
+
+void IotSSL::buildMessage(char* request, int len, const char* key, char* body) {
+    snprintf(request, len, "POST /fcm/send HTTP/1.1\n"
+			"Host: fcm.googleapis.com\n"
+			"User-Agent: BBQTemp\n"
+			"Accept: */*\n"
+			"Connection: keep-alive\n"
+			"Content-Type: application/json\n"
+			"Authorization: key=%s\n"
+			"Content-length: %d\n\n"
+			"%s",
+			key, strlen(body), body);
+}
+
 int IotSSL::init() {
     int ret, flags;
 
-    mbedtls_ssl_init(&ssl);
+mbedtls_ssl_init(&ssl);
     mbedtls_x509_crt_init(&cacert);
     mbedtls_ctr_drbg_init(&ctr_drbg);
     ESP_LOGI(TAG, "Seeding the random number generator");
@@ -56,7 +70,7 @@ int IotSSL::init() {
     ESP_LOGI(TAG, "Setting hostname for TLS session...");
 
      /* Hostname set here should match CN in server certificate */
-    if((ret = mbedtls_ssl_set_hostname(&ssl, WEB_SERVER)) != 0) {
+    if((ret = mbedtls_ssl_set_hostname(&ssl, server)) != 0) {
         ESP_LOGE(TAG, "mbedtls_ssl_set_hostname returned -0x%x", -ret);
         return ret;
     }
@@ -80,21 +94,7 @@ int IotSSL::init() {
     mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
     mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
 
-
-
-	return ret;
-}
-
-int IotSSL::send() {
-	init();
-	char request[512];
-
-	char body[] = "{\"user_id\" : \"jack\", \"text\" : \"Ahoy 2\"}";
-    int ret, len, flags;
-
-
-
-    if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0)
+   if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0)
     {
         ESP_LOGE(TAG, "mbedtls_ssl_setup returned -0x%x\n\n", -ret);
            mbedtls_strerror(ret, buf, 100);
@@ -103,10 +103,11 @@ int IotSSL::send() {
     }
 
     mbedtls_net_init(&server_fd);
-    ESP_LOGI(TAG, "Connecting to %s:%s...", WEB_SERVER, WEB_PORT);
+	
+    ESP_LOGI(TAG, "Connecting to %s:%s...", server, port);
 
-    if ((ret = mbedtls_net_connect(&server_fd, WEB_SERVER,
-                                  WEB_PORT, MBEDTLS_NET_PROTO_TCP)) != 0)
+    if ((ret = mbedtls_net_connect(&server_fd, server,
+                                  port, MBEDTLS_NET_PROTO_TCP)) != 0)
     {
          ESP_LOGE(TAG, "mbedtls_net_connect returned -%x", -ret);
          return ret;
@@ -116,8 +117,7 @@ int IotSSL::send() {
     mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
     ESP_LOGI(TAG, "Performing the SSL/TLS handshake...");
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
-        {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             ESP_LOGE(TAG, "mbedtls_ssl_handshake returned -0x%x", -ret);
             return ret;
         }
@@ -132,77 +132,108 @@ int IotSSL::send() {
     } else {
         ESP_LOGI(TAG, "Certificate verified.");
     }
-
-
-
-    ESP_LOGI(TAG, "Writing HTTP request...");
-	snprintf(request, 512, "POST /message_list.json HTTP/1.1\n"
-			"Host: bbqtest-c47a8.firebaseio.com\n"
-			"User-Agent: BBQTemp\n"
-			"Accept: */*\n"
-			"Connection: keep-alive\n"
-			"Content-Type: application/x-www-form-urlencoded\n"
-			"Content-length: %d\n\n"
-			"%s",
-			strlen(body), body);
-
-
-        while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)request, strlen(request))) <= 0)
-        {
-            if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-                ESP_LOGE(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
-                return ret;
-            }
-        }
-
-        len = ret;
-        ESP_LOGI(TAG, "%d bytes written", len);
-        ESP_LOGI(TAG, "Reading HTTP response...");
-		fcntl( server_fd.fd, F_SETFL, fcntl( server_fd.fd, F_GETFL, 0 ) | O_NONBLOCK );
-        do
-        {
-            len = sizeof(buf) - 1;
-            bzero(buf, sizeof(buf));
-            ret = mbedtls_ssl_read(&ssl, (unsigned char *)buf, len);
-			ESP_LOGI(TAG,"Statis: %d,%d",len,ret);
-            if(ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-				ESP_LOGI(TAG,"WANT_READ");
-                continue;
-			}
-            if(ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
-				ESP_LOGI(TAG,"CLOSE");
-                ret = 0;
-                break;
-            }
-            if(ret < 0)
-            {
-                ESP_LOGE(TAG, "mbedtls_ssl_read returned -0x%x", -ret);
-                break;
-            }
-            if(ret == 0)
-            {
-                ESP_LOGI(TAG, "connection closed");
-                break;
-            }
-            len = ret;
-            ESP_LOGI(TAG, "%d bytes read", len);
-            /* Print response directly to stdout as it is read */
-            for(int i = 0; i < len; i++) {
-                putchar(buf[i]);
-            }
-        } while(1);
-
-mbedtls_net_free( &server_fd );
-mbedtls_ssl_free( &ssl );
-mbedtls_ssl_config_free( &conf );
-mbedtls_ctr_drbg_free( &ctr_drbg );
-mbedtls_entropy_free( &entropy );
-
-		return 0;
+	return ret;
 }
 
-void IotSSL::close() {
+int IotSSL::stop() {
 //	mbedtls_ssl_close_notify(&ssl);
  //   mbedtls_ssl_session_reset(&ssl);
   //  mbedtls_net_free(&server_fd);
+
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+
+    if (&cacert != NULL) {
+        mbedtls_x509_crt_free(&cacert);
+    }
+/*
+    if (cli_cert != NULL) {
+        mbedtls_x509_crt_free(&ssl_client->client_cert);
+    }
+
+    if (cli_key != NULL) {
+        mbedtls_pk_free(&ssl_client->client_key);
+    }
+
+    */
+	return 0;
+}
+
+int IotSSL::isAvailable() {
+    int res = data_to_read();
+    ESP_LOGI(TAG, "isAvailable: %d",res);
+    if (res < 0 ) {
+		ESP_LOGE(TAG, "isAvailable ERROR %d",res);
+		error = res;
+    }	
+    return res;
+}
+
+int IotSSL::data_to_read() {
+    int ret, res;
+	mbedtls_net_set_nonblock(&server_fd);
+	res = mbedtls_ssl_get_bytes_avail(&ssl);
+    ret = mbedtls_ssl_read(&ssl, NULL, 0);
+    res = mbedtls_ssl_get_bytes_avail(&ssl);
+    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE && ret < 0) {
+        return ret;
+    }
+    return res;
+}
+
+int IotSSL::write(unsigned char *data, uint16_t len) {
+    int ret = -1;
+    if (error) {
+        ESP_LOGE(TAG, "In error state, write not allowed");
+    }
+    while ((ret = mbedtls_ssl_write(&ssl, data, len)) <= 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            ESP_LOGE(TAG, "Write Error: %d",ret);
+            error = ret;
+            return ret;
+        }
+    }
+    if (ret < 0) {
+        ESP_LOGE(TAG, "Write Error: %d",ret);
+        error = ret;
+    } else {    
+        ESP_LOGI(TAG, "Bytes written: %d",ret);
+    }
+    len = ret;
+    return ret;
+}
+
+int IotSSL::read(unsigned char *data, int length) {
+    if (error) {
+        ESP_LOGE(TAG, "In error state, read not allowed");
+    }
+    int ret = -1;
+    ret = mbedtls_ssl_read(&ssl, data, length);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "Read Error: %d",ret);
+        error = ret;
+    }
+    return ret;
+}
+
+int IotSSL::send(unsigned char *writebuf, unsigned char *readbuf, int read_size) {
+    int rc = write(writebuf, strlen((const char*)writebuf));
+    while(isAvailable() && !error) {
+        read(readbuf,read_size);
+    }
+    if (error) {
+        ESP_LOGW(TAG, "Send Error; reconnecting %d",error);
+        stop();
+        rc = init();
+        if (rc) {
+             ESP_LOGE(TAG, "Reconnect failed: %d",rc);
+             abort();
+        } else {
+            error = 0;
+            ESP_LOGI(TAG, "reconnect successful");
+        }
+    }
+    return rc;
 }

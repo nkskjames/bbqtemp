@@ -119,6 +119,13 @@ static char *mgStrToStr(struct mg_str mgStr) {
 	return retStr;
 } // mgStrToStr
 
+void get_thing_name(char* thingName) {
+    uint8_t mac[6];
+	char tmpName[255];
+    esp_efuse_read_mac(mac);
+    sprintf(tmpName,"%s_%02X%02X%02X%02X%02X%02X","BBQTemp",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);	
+	strcpy(thingName,tmpName);
+}
 
 /**
  * Handle mongoose events.  These are mostly requests to process incoming
@@ -128,7 +135,11 @@ static char *mgStrToStr(struct mg_str mgStr) {
  * POST /ssidSelected - Set the connection info (HTML FORM).
  */
 static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evData) {
-	ESP_LOGD(tag, "- Event: %s", mongoose_eventToString(ev));
+	if (ev == 0) {
+		printf(".");
+	} else {
+		ESP_LOGD(tag, "- Event: %s,%d,%d", mongoose_eventToString(ev),ev,MG_EV_MQTT_CONNACK);
+	}
 	switch (ev) {
 		case MG_EV_HTTP_REQUEST: {
 			struct http_message *message = (struct http_message *) evData;
@@ -142,9 +153,14 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 				ESP_LOGD(tag, "- Set the new connection info to ssid: %s, password: %s",
 					connectionInfo.ssid, connectionInfo.password);
 				mg_send_head(nc, 200, 0, "Content-Type: text/plain");
-			} if (strcmp(uri, "/") == 0) {
+			} 
+			if (strcmp(uri, "/") == 0) {
 				mg_send_head(nc, 200, sizeof(selectAP_html), "Content-Type: text/html");
 				mg_send(nc, selectAP_html, sizeof(selectAP_html));
+			}
+			if(strcmp(uri, "/reboot") == 0) {
+				ESP_LOGD(tag,"Rebooting...");
+				g_mongooseStopRequest = 1;
 			}
 			// Handle /ssidSelected
 			// This is an incoming form with properties:
@@ -185,10 +201,29 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 				}
 
 				ESP_LOGD(tag, "ssid: %s, password: %s, username: %s", connectionInfo.ssid, connectionInfo.password,connectionInfo.username);
+				if (strlen(connectionInfo.ssid) == 0 || strlen(connectionInfo.username) == 0) {
+					ESP_LOGD(tag, "Field empty");
+					mg_send_head(nc, 300, 0, "Content-Type: text/plain");
+					//mg_send(nc, "error", 5);
+					nc->flags |= MG_F_SEND_AND_CLOSE;
+					free(uri);
+					break;
+				}
 
-				mg_send_head(nc, 200, 0, "Content-Type: text/plain");
+				
+				char thingName[255];
+				get_thing_name(thingName);
+				
+
+				char html_body[512];
+				sprintf(html_body,"<html><body>%s</body></html>",thingName);
+				ESP_LOGD(tag, "Thing name: %s,%d",html_body,strlen(html_body));
+				mg_send_head(nc, 200, strlen(thingName), "Content-Type: text/plain");
+				mg_printf(nc, thingName, strlen(thingName));
+
 				saveConnectionInfo(&connectionInfo);
-				bootWiFi2();
+				g_mongooseStopRequest = 1;
+				//bootWiFi2();
 			} // url is "/ssidSelected"
 			// Else ... unknown URL
 			else {
@@ -227,6 +262,10 @@ static void mongooseTask(void *data) {
 	while (!g_mongooseStopRequest) {
 		mg_mgr_poll(&mgr, 1000);
 	}
+	ESP_LOGD(tag, "Stopping Mongoose...");
+	mg_mgr_poll(&mgr, 1000);
+	mg_mgr_poll(&mgr, 1000);
+	mg_mgr_poll(&mgr, 1000);
 
 	// We have received a stop request, so stop being a web server.
 	mg_mgr_free(&mgr);
@@ -234,11 +273,13 @@ static void mongooseTask(void *data) {
 
 	// Since we HAVE ended mongoose, time to invoke the callback.
 	if (g_callback) {
-		g_callback(1);
+		g_callback(2);
 	}
 
 	ESP_LOGD(tag, "<< mongooseTask");
 	vTaskDelete(NULL);
+
+
 	return;
 } // mongooseTask
 
@@ -428,9 +469,9 @@ static void becomeAccessPoint() {
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 	wifi_config_t apConfig = {
 		.ap = {
-			.ssid="ESP32 Duktape",
+			.ssid="BBQTemp",
 			.ssid_len=0,
-			.password="Duktape",
+			.password="",
 			.channel=0,
 			.authmode=WIFI_AUTH_OPEN,
 			.ssid_hidden=0,

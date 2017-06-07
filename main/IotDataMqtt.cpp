@@ -12,6 +12,8 @@
 #include "aws_iot_version.h"
 #include "aws_iot_mqtt_client_interface.h"
 #include "aws_iot_shadow_interface.h"
+#include "cJSON.h"
+
 #include "IotData.hpp"
 #include "IotDataMqtt.hpp"
 
@@ -32,6 +34,8 @@ extern const uint8_t certificate_and_ca_pem_crt_end[] asm("_binary_certificate_a
 
 uint32_t s_version = 0x0100;
 
+
+#define SIZEOF(x)  (sizeof(x) / sizeof((x)[0]))
 
 /**
  * Save signup status
@@ -121,12 +125,47 @@ static bool shadowUpdateInProgress;
 void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen,
                                     IoT_Publish_Message_Params *params, void *pData) {
     static const char* TAG = "subscribe_callback";
-    ESP_LOGI(TAG, "Subscribe callback");
+    ESP_LOGI(TAG, "Subscribe callback: %s",(char*)params->payload);
+    
+	cJSON *root = cJSON_Parse((char*)params->payload);
+	cJSON *current = cJSON_GetObjectItem(root,"current");
+	cJSON *state = cJSON_GetObjectItem(current,"state");
+	cJSON *reported = cJSON_GetObjectItem(state,"reported");
+	cJSON *td = cJSON_GetObjectItem(reported,"td");
+	cJSON *tl = cJSON_GetObjectItem(reported,"tl");
+	cJSON *tu = cJSON_GetObjectItem(reported,"tu");
+	cJSON *token = cJSON_GetObjectItem(reported,"token");
+
+	int sz = cJSON_GetArraySize(td);
+	if (sz > SIZEOF(thingData.td)) { sz = SIZEOF(thingData.td); }
+	ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.td));
+	for (int i = 0 ; i < sz ; i++) {
+		strcpy(thingData.td[i],cJSON_GetArrayItem(td,i)->valuestring);
+	}
+	sz = cJSON_GetArraySize(tu);
+	if (sz > SIZEOF(thingData.tu)) { sz = SIZEOF(thingData.tu); }
+	ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.tu));
+	for (int i = 0 ; i < sz ; i++) {
+		thingData.tu[i] = cJSON_GetArrayItem(tu,i)->valuedouble;
+	}
+	sz = cJSON_GetArraySize(tl);
+	if (sz > SIZEOF(thingData.tl)) { sz = SIZEOF(thingData.tl); }
+	ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.tl));
+	for (int i = 0 ; i < sz ; i++) {
+		thingData.tl[i] = cJSON_GetArrayItem(tl,i)->valuedouble;
+	}
+	if (token) {
+		strcpy(thingData.token,token->valuestring);
+        thingData.valid = true;
+	} else {
+        thingData.valid = false;
+    }
     ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int) params->payloadLen, (char *)params->payload);
 }
 
-int IotDataMqtt::subscribe(char* thingId) {
+int IotDataMqtt::subscribe(char* username) {
     IoT_Error_t rc = FAILURE;
+    char cPayload[100];
 
     AWS_IoT_Client client;
     IoT_Client_Init_Params mqttInitParams = iotClientInitParamsDefault;
@@ -160,8 +199,8 @@ int IotDataMqtt::subscribe(char* thingId) {
     connectParams.isCleanSession = true;
     connectParams.MQTTVersion = MQTT_3_1_1;
     /* Client ID is set in the menuconfig of the example */
-    connectParams.pClientID = thingId;
-    connectParams.clientIDLen = (uint16_t) strlen(thingId);
+    connectParams.pClientID = thingData.thingName;
+    connectParams.clientIDLen = (uint16_t) strlen(thingData.thingName);
     connectParams.isWillMsgPresent = false;
 
     ESP_LOGI(TAG, "Connecting to AWS...");
@@ -172,7 +211,7 @@ int IotDataMqtt::subscribe(char* thingId) {
             vTaskDelay(1000 / portTICK_RATE_MS);
         }
     } while(SUCCESS != rc);
-
+    ESP_LOGI(TAG, ">>>>>>>>>>>>>>>>>>>>>>> Done Connecting to AWS...");
     /*
      * Enable Auto Reconnect functionality. Minimum and Maximum time of Exponential backoff are set in aws_iot_config.h
      *  #AWS_IOT_MQTT_MIN_RECONNECT_WAIT_INTERVAL
@@ -184,26 +223,45 @@ int IotDataMqtt::subscribe(char* thingId) {
         abort();
     }
 	char topic[100];
-    sprintf(topic,"$aws/things/%s/shadow/update/accepted",thingId);
+    sprintf(topic,"$aws/things/%s/shadow/update/documents",thingData.thingName);
 
     ESP_LOGI(TAG, "Subscribing: %s",topic);
-    rc = aws_iot_mqtt_subscribe(&client, topic, strlen(topic), QOS0, iot_subscribe_callback_handler, NULL);
+    rc = aws_iot_mqtt_subscribe(&client, topic, strlen(topic), QOS0, iot_subscribe_callback_handler, &thingData);
     if(SUCCESS != rc) {
         ESP_LOGE(TAG, "Error subscribing : %d ", rc);
         abort();
     }
+    
+    
+    const char *TOPIC = "topic/iot_signup";
+    const int TOPIC_LEN = strlen(TOPIC);
 
+    IoT_Publish_Message_Params paramsQOS0;
+    paramsQOS0.qos = QOS0;
+    paramsQOS0.payload = (void *) cPayload;
+    sprintf(cPayload, "{\"username\" : \"%s\"}",username);
+    paramsQOS0.isRetained = 0;
+    paramsQOS0.payloadLen = strlen(cPayload);
+    
+    bool first = true;
     while((NETWORK_ATTEMPTING_RECONNECT == rc || NETWORK_RECONNECTED == rc || SUCCESS == rc)) {
 
         //Max time the yield function will wait for read messages
         rc = aws_iot_mqtt_yield(&client, 100);
-        ESP_LOGI(TAG, "-->sleep: %d",rc);		
+        //ESP_LOGI(TAG, "-->sleep: %d",rc);		
         if(NETWORK_ATTEMPTING_RECONNECT == rc) {
             // If the client is attempting to reconnect we will skip the rest of the loop.
             continue;
         }
-
-
+        if (first) {
+			ESP_LOGI(TAG, "First Publish");
+            rc = aws_iot_mqtt_publish(&client, TOPIC, TOPIC_LEN, &paramsQOS0);
+            if (rc == MQTT_REQUEST_TIMEOUT_ERROR) {
+                ESP_LOGW(TAG, "QOS1 publish ack not received.");
+                rc = SUCCESS;
+            }
+            first = false;
+        }
         vTaskDelay(1000 / portTICK_RATE_MS);
     }
 
@@ -247,6 +305,7 @@ static void ShadowUpdateStatusCallback(const char *pThingName, ShadowActions_t a
         ESP_LOGI(TAG, "Update accepted");
     }
 }
+
 
 int IotDataMqtt::signup(char* thingId,char* username) {
     if (isRegistered()) { return 0; }

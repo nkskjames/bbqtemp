@@ -1,2 +1,3 @@
-build/
-sdkconfig.old
+/build
+/components
+/main/certs

@@ -13,16 +13,25 @@ class IotSSL {
     mbedtls_x509_crt cacert;
     mbedtls_ssl_config conf;
 
-	const char* WEB_SERVER = "bbqtest-c47a8.firebaseio.com";
-	const char* WEB_PORT = "443";
 	char buf[512];
 	const char* TAG = "IotSSL";
+	int error = 0;
+    char server[256];
+    char port[4];
+    
 	public:
-		
-		int send();
+        IotSSL(const char* server, const char* port) {
+                strcpy(this->server, server);
+                strcpy(this->port, port);
+        }
+        void buildMessage(char*, int, const char*, char*);
 		int init();
-		void close();
-		
+		int stop();
+		int isAvailable();
+		int data_to_read();
+		int write(unsigned char*, uint16_t);
+		int read(unsigned char*, int);
+		int send(unsigned char*, unsigned char*, int);
 };
 
 #endif

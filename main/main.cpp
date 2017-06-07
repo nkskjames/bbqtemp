@@ -25,6 +25,8 @@ extern "C" {
 #include "IotDataMqtt.hpp"
 #include "IotSSL.hpp"
 
+extern const char firebase_apikey_start[] asm("_binary_firebase_apikey_start");
+extern const char firebase_apikey_end[] asm("_binary_firebase_apikey_end");
 
 static const adc1_channel_t ADC_TEMP1 = ADC1_CHANNEL_7;
 static const char *TAG = "main";
@@ -39,7 +41,9 @@ static const double Ri = Ro * exp(-B/To);
 static const gpio_num_t CONFIG_RESET_GPIO = GPIO_NUM_0;
 static const float DELTA_TEMP = 2;
 
-extern char* token[150];
+data_t thingData;
+
+
 
 static void initialize_sntp(void)
 {
@@ -68,11 +72,10 @@ static void obtain_time(void)
     }
 }
 
-void get_mac_address(char* macAddress) {
+void getThingName(char* thingName) {
     uint8_t mac[6];
     esp_efuse_read_mac(mac);
-    ESP_LOGI(TAG,"size: %zu",sizeof(macAddress));
-    sprintf(macAddress,"%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+    sprintf(thingName,"BBQTemp_%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
 }
 
 float getTemperature(adc1_channel_t channel) {
@@ -90,17 +93,11 @@ float getTemperature(adc1_channel_t channel) {
 }
 
 void subscribe_task(void *param) {
-    char macAddress[14];
-    get_mac_address(macAddress);
-
-    char thing_id[32];    
-
-    int sample_num = 0;
-	char fullName[256];
-	sprintf(fullName,"BBQTemp_%s",macAddress);
-
     IotDataMqtt data;
-    data.subscribe(fullName);
+    thingData.valid = false;
+    connection_info_t connectionInfo;
+    getConnectionInfo(&connectionInfo);
+    data.subscribe(connectionInfo.username);
     vTaskDelete(NULL);
 }
 
@@ -110,68 +107,92 @@ void sample_task(void *param) {
     connection_info_t connectionInfo;
     getConnectionInfo(&connectionInfo);
     ESP_LOGI(TAG,"Username: %s",connectionInfo.username);    
-    char macAddress[14];
-    get_mac_address(macAddress);
 
-    char thing_id[32];    
     char JsonDocumentBuffer[MAX_LENGTH_OF_UPDATE_JSON_BUFFER];
-    //size_t sizeOfJsonDocumentBuffer = sizeof(JsonDocumentBuffer) / sizeof(JsonDocumentBuffer[0]);
-	//ESP_LOGI(TAG,"Buffer: %d",sizeOfJsonDocumentBuffer);
-
     int sample_num = 0;
-	char fullName[256];
-	sprintf(fullName,"BBQTemp_%s",macAddress);
 
 
-	IotSSL post;
-
-//	post.init();
 
     time_t now = 0;
     struct tm timeinfo;
 
-	float last_temp[4] = {0,0,0,0};
-	float temp[4] = {0,0,0,0};
+	double last_sent_temp[3] = {0,0,0};
+    double last_temp[3] = {0,0,0};
+    thingData.t[0] = 0;
+    thingData.t[1] = 0;
+    thingData.t[2] = 0;
+	    
+    char response[512];
+    char request[1024];
+    char body[512];
 	//getTemperature(ADC_TEMP1);
-	temp[1] = 10;
-	for (int i =0 ; i<10; i++) {
-		post.send();
-	    vTaskDelay(5000 / portTICK_PERIOD_MS);
-	}
-    for (sample_num = 0; sample_num<6000; sample_num++) {
+	char firebase_apikey[40];
+	strncpy(firebase_apikey,firebase_apikey_start,39);
+	firebase_apikey[39] = '\0';
+        
+
+    while (strlen(thingData.token) == 0) {
+        ESP_LOGI(TAG,"Waiting for publish");
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+  	IotSSL post("fcm.googleapis.com","443");
+    post.init();
+
+    ESP_LOGI(TAG,"Start Sampling: %s,", firebase_apikey_start);
+    bool first = false;
+    for (sample_num = 0; sample_num<10; sample_num++) {
 	    ESP_LOGI(TAG,"Sample: %d",sample_num);    
 		time(&now);
         localtime_r(&now, &timeinfo);
 		
-		temp[0] = getTemperature(ADC_TEMP1);
+		thingData.t[0] = getTemperature(ADC_TEMP1);
+        thingData.t[1] = thingData.t[1] + 10;
+        thingData.t[2] = thingData.t[2] + 100;
 
-		ESP_LOGI(TAG,"Temp0: %0.1f",temp[0]);
-		ESP_LOGI(TAG,"Temp1: %0.1f",temp[1]);
 		bool update = false;
-		for (int i=0;i<4;i++) {
-			if (abs(last_temp[i]-temp[i]) > DELTA_TEMP) {
+		for (int i=0;i<3;i++) {
+			if (abs(last_sent_temp[i]-thingData.t[i]) > DELTA_TEMP) {
 				update = true;
 			}
 		}
-
 		if (update) {
-			//sprintf(thing_id,"%s-%d/%d;%d:%d",macAddress,timeinfo.tm_mon,timeinfo.tm_mday,timeinfo.tm_hour,timeinfo.tm_min);
-			sprintf(thing_id,"%s-%d",macAddress,sample_num);
-			sprintf(JsonDocumentBuffer,
-				"{\"state\": {\"reported\": {\"thingname\": \"%s\", \"username\":\"%s\",\"t\": [%0.0f,%0.0f,%0.0f]}}, \"clientToken\":\"%s\"}",
-				fullName,connectionInfo.username,temp[0],temp[1],temp[2],thing_id);
+			strcpy(thingData.prettyName,"a");
+            snprintf(body, 512, "{ \"to\" : \"%s\", \"data\" : { \"t\": [%0.0f,%0.0f,%0.0f], \"tu\": [%0.0f,%0.0f,%0.0f], \"tl\": [%0.0f,%0.0f,%0.0f], \"td\": [\"%s\",\"%s\",\"%s\"], \"thingName\" : \"%s\", \"prettyName\" : \"%s\"  } }",
+                                thingData.token,
+                                thingData.t[0],thingData.t[1],thingData.t[2],
+                                thingData.tu[0],thingData.tu[1],thingData.tu[2],
+                                thingData.tl[0],thingData.tl[1],thingData.tl[2],
+                                thingData.td[0],thingData.td[1],thingData.td[2],
+								thingData.thingName,thingData.prettyName);
 
-			//TODO: add error checking
-			//data.sendraw(JsonDocumentBuffer);
-			for (int i=0;i<4;i++) {
-				last_temp[i] = temp[i];
+            ESP_LOGI(TAG,"Body: %s",(unsigned char*)body);
+            post.buildMessage(request,1024,firebase_apikey,body);
+            post.send((unsigned char*)request, (unsigned char*)response, 512);
+            ESP_LOGI(TAG,"Response: %s",(unsigned char*)response);
+			for (int i=0;i<3;i++) {
+				last_sent_temp[i] = thingData.t[i];
 			}
 		}
-        
-		//temp[1] = temp[1]+2;
+        // Threshold checking
+        for (int i=0;i<3;i++) {
+            if (thingData.t[i] >= thingData.tu[i] && last_temp[i] < thingData.tu[i] && first) {
+				ESP_LOGI(TAG,"Over: %d",i);
+                snprintf(body, 512, "{\"to\" : \"%s\", \"notification\" : { \"body\" : \"Over Temp: %s\" }, \"priority\" : 10 }",thingData.token, thingData.td[i]);
+                post.buildMessage(request,1024,firebase_apikey,body);
+                post.send((unsigned char*)request, (unsigned char*)response, 512);
+            }
+            if (thingData.t[i] <= thingData.tl[i] && last_temp[i] > thingData.tl[i] && first) {
+				ESP_LOGI(TAG,"Under: %d",i);
+                snprintf(body, 512, "{\"to\" : \"%s\", \"notification\" : { \"body\" : \"Under Temp: %s\" }, \"priority\" : 10 }",thingData.token, thingData.td[i]);
+                post.buildMessage(request,1024,firebase_apikey,body);
+                post.send((unsigned char*)request, (unsigned char*)response, 512);
+            }
+			last_temp[i] = thingData.t[i];
+		}
+        first = true;
 	    vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
-    post.close();
+    post.stop();
     vTaskDelete(NULL);
 }
 
@@ -191,7 +212,7 @@ void wifi_setup_done(int rc) {
     	xTaskCreate(&delayed_reboot_task, "delayed_reboot_task", 36*1024, NULL, 5, NULL);		
 	} else {
 	    //obtain_time();
-		//xTaskCreate(&subscribe_task, "subscribe_task", 36*1024, NULL, 5, NULL);
+		xTaskCreate(&subscribe_task, "subscribe_task", 36*1024, NULL, 5, NULL);
     	xTaskCreate(&sample_task, "sample_task", 48*1024, NULL, 4, NULL);
 
 	}
@@ -216,6 +237,8 @@ static void clearConfig() {
 
 extern "C" void app_main(void)
 {
+    getThingName(thingData.thingName);
+    
     // Setup IO
 	gpio_pad_select_gpio(CONFIG_RESET_GPIO);
 	gpio_set_direction(CONFIG_RESET_GPIO, GPIO_MODE_INPUT);
