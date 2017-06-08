@@ -163,7 +163,7 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
     ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int) params->payloadLen, (char *)params->payload);
 }
 
-int IotDataMqtt::subscribe(char* username) {
+int IotDataMqtt::subscribe(char* username, char* token) {
     IoT_Error_t rc = FAILURE;
 
     AWS_IoT_Client client;
@@ -240,7 +240,7 @@ int IotDataMqtt::subscribe(char* username) {
     IoT_Publish_Message_Params paramsQOS0;
     paramsQOS0.qos = QOS0;
     paramsQOS0.payload = (void *) cPayload;
-    sprintf(cPayload, "{\"username\" : \"%s\"}",username);
+    sprintf(cPayload, "{\"username\" : \"%s\", \"token\": \"%s\"}",username,token);
     paramsQOS0.isRetained = 0;
     paramsQOS0.payloadLen = strlen(cPayload);
     
