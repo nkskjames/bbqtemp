@@ -24,6 +24,8 @@
 #include "sdkconfig.h"
 #include "selectAP.h"
 
+#include "thingData.h"
+
 // If the structure of a record saved for a subsequent reboot changes
 // then consider using semver to change the version number or else
 // we may try and boot with the wrong data.
@@ -178,6 +180,7 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 				mg_get_http_var(&message->body, "ssid",	connectionInfo.ssid, SSID_SIZE);
 				mg_get_http_var(&message->body, "password", connectionInfo.password, PASSWORD_SIZE);
 				mg_get_http_var(&message->body, "username", connectionInfo.username, USERNAME_SIZE);
+				mg_get_http_var(&message->body, "token", thingData.token, 164);
 
 				char ipBuf[20];
 				if (mg_get_http_var(&message->body, "ip", ipBuf, sizeof(ipBuf)) > 0) {
@@ -200,7 +203,7 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 					connectionInfo.ipInfo.netmask.addr = 0;
 				}
 
-				ESP_LOGD(tag, "ssid: %s, password: %s, username: %s", connectionInfo.ssid, connectionInfo.password,connectionInfo.username);
+				ESP_LOGD(tag, "ssid: %s\npassword: %s\nusername: %s\ntoken: %s", connectionInfo.ssid, connectionInfo.password,connectionInfo.username,thingData.token);
 				if (strlen(connectionInfo.ssid) == 0 || strlen(connectionInfo.username) == 0) {
 					ESP_LOGD(tag, "Field empty");
 					mg_send_head(nc, 300, 0, "Content-Type: text/plain");

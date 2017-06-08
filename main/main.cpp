@@ -41,8 +41,13 @@ static const double Ri = Ro * exp(-B/To);
 static const gpio_num_t CONFIG_RESET_GPIO = GPIO_NUM_0;
 static const float DELTA_TEMP = 2;
 
-data_t thingData;
-
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern data_t thingData;
+#ifdef __cplusplus
+}
+#endif
 
 
 static void initialize_sntp(void)
@@ -108,11 +113,7 @@ void sample_task(void *param) {
     getConnectionInfo(&connectionInfo);
     ESP_LOGI(TAG,"Username: %s",connectionInfo.username);    
 
-    char JsonDocumentBuffer[MAX_LENGTH_OF_UPDATE_JSON_BUFFER];
     int sample_num = 0;
-
-
-
     time_t now = 0;
     struct tm timeinfo;
 
@@ -121,6 +122,21 @@ void sample_task(void *param) {
     thingData.t[0] = 0;
     thingData.t[1] = 0;
     thingData.t[2] = 0;
+
+    thingData.tu[0] = 1000;
+    thingData.tu[1] = 1000;
+    thingData.tu[2] = 1000;
+
+    thingData.tl[0] = 0;
+    thingData.tl[1] = 0;
+    thingData.tl[2] = 0;
+
+	strcpy(thingData.td[0],"Temp 1");
+	strcpy(thingData.td[1],"Temp 2");
+	strcpy(thingData.td[2],"Temp 3");
+
+	strcpy(thingData.token,"");
+	strcpy(thingData.prettyName,"");
 	    
     char response[512];
     char request[1024];
@@ -157,7 +173,9 @@ void sample_task(void *param) {
 		}
 		if (update) {
 			strcpy(thingData.prettyName,"a");
-            snprintf(body, 512, "{ \"to\" : \"%s\", \"data\" : { \"t\": [%0.0f,%0.0f,%0.0f], \"tu\": [%0.0f,%0.0f,%0.0f], \"tl\": [%0.0f,%0.0f,%0.0f], \"td\": [\"%s\",\"%s\",\"%s\"], \"thingName\" : \"%s\", \"prettyName\" : \"%s\"  } }",
+            snprintf(body, 512, "{ \"collapse_key\": \"temperature\", \"time_to_live\" : 120, \"to\" : \"%s\","
+			"\"data\" : { \"t\": [%0.0f,%0.0f,%0.0f], \"tu\": [%0.0f,%0.0f,%0.0f], \"tl\": [%0.0f,%0.0f,%0.0f], \"td\": [\"%s\",\"%s\",\"%s\"],"
+			"\"thingName\" : \"%s\", \"prettyName\" : \"%s\"  } }",
                                 thingData.token,
                                 thingData.t[0],thingData.t[1],thingData.t[2],
                                 thingData.tu[0],thingData.tu[1],thingData.tu[2],
@@ -190,7 +208,7 @@ void sample_task(void *param) {
 			last_temp[i] = thingData.t[i];
 		}
         first = true;
-	    vTaskDelay(5000 / portTICK_PERIOD_MS);
+	    vTaskDelay(3000 / portTICK_PERIOD_MS);
     }
     post.stop();
     vTaskDelete(NULL);

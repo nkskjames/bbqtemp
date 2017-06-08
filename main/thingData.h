@@ -1,0 +1,23 @@
+#ifndef THINGDATA_H_
+#define THINGDATA_H_
+
+
+typedef struct {
+    bool valid;
+    double t[4];
+	double tu[4];
+	double tl[4];
+	char td[4][128];
+	char token[164];
+    char thingName[64];
+	char prettyName[64];
+	char username[64];
+} data_t;
+
+#ifdef __cplusplus
+    extern "C" data_t thingData;
+#else
+	data_t thingData;
+#endif
+
+#endif
