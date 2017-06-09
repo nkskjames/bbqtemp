@@ -102,7 +102,7 @@ void subscribe_task(void *param) {
     thingData.valid = false;
     connection_info_t connectionInfo;
     getConnectionInfo(&connectionInfo);
-    data.subscribe(connectionInfo.username);
+    data.subscribe(connectionInfo.username,connectionInfo.token);
     vTaskDelete(NULL);
 }
 
@@ -145,14 +145,21 @@ void sample_task(void *param) {
 	char firebase_apikey[40];
 	strncpy(firebase_apikey,firebase_apikey_start,39);
 	firebase_apikey[39] = '\0';
-        
+
+  	IotSSL post("fcm.googleapis.com","443");
+    post.init();
+    snprintf(body, 512, "{ \"collapse_key\": \"subscribed\", \"time_to_live\" : 120, \"to\" : \"%s\","
+			"\"data\" : { \"command\": \"subscribed\"  } }",connectionInfo.token);
+
+            ESP_LOGI(TAG,"Body: %s",(unsigned char*)body);
+            post.buildMessage(request,1024,firebase_apikey,body);
+            post.send((unsigned char*)request, (unsigned char*)response, 512);
+    
 
     while (strlen(thingData.token) == 0) {
         ESP_LOGI(TAG,"Waiting for publish");
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
-  	IotSSL post("fcm.googleapis.com","443");
-    post.init();
 
     ESP_LOGI(TAG,"Start Sampling: %s,", firebase_apikey_start);
     bool first = false;
@@ -175,7 +182,7 @@ void sample_task(void *param) {
 			strcpy(thingData.prettyName,"a");
             snprintf(body, 512, "{ \"collapse_key\": \"temperature\", \"time_to_live\" : 120, \"to\" : \"%s\","
 			"\"data\" : { \"t\": [%0.0f,%0.0f,%0.0f], \"tu\": [%0.0f,%0.0f,%0.0f], \"tl\": [%0.0f,%0.0f,%0.0f], \"td\": [\"%s\",\"%s\",\"%s\"],"
-			"\"thingName\" : \"%s\", \"prettyName\" : \"%s\"  } }",
+			"\"thingName\" : \"%s\", \"prettyName\" : \"%s\", \"command\": \"data\"  } }",
                                 thingData.token,
                                 thingData.t[0],thingData.t[1],thingData.t[2],
                                 thingData.tu[0],thingData.tu[1],thingData.tu[2],

@@ -22,7 +22,7 @@ class IotDataMqtt {
 	uint32_t PORT = CONFIG_AWS_IOT_MQTT_PORT;
 	
         public:
-	int subscribe(char*);
+	int subscribe(char*,char*);
 	int close();
 	
 	char* getToken() {
