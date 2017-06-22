@@ -139,7 +139,6 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
 	if (td) {
 		int sz = cJSON_GetArraySize(td);
 		if (sz > SIZEOF(thingData.td)) { sz = SIZEOF(thingData.td); }
-		ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.td));
 		for (int i = 0 ; i < sz ; i++) {
 			strcpy(thingData.td[i],cJSON_GetArrayItem(td,i)->valuestring);
 		}
@@ -147,7 +146,6 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
 	if (tu) {
 		int sz = cJSON_GetArraySize(tu);
 		if (sz > SIZEOF(thingData.tu)) { sz = SIZEOF(thingData.tu); }
-		ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.tu));
 		for (int i = 0 ; i < sz ; i++) {
 			thingData.tu[i] = cJSON_GetArrayItem(tu,i)->valuedouble;
 		}
@@ -155,7 +153,6 @@ void iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, ui
 	if (tl) {
 		int sz = cJSON_GetArraySize(tl);
 		if (sz > SIZEOF(thingData.tl)) { sz = SIZEOF(thingData.tl); }
-		ESP_LOGI(TAG, "SiE: %d,%d",sz,SIZEOF(thingData.tl));
 		for (int i = 0 ; i < sz ; i++) {
 			thingData.tl[i] = cJSON_GetArrayItem(tl,i)->valuedouble;
 		}
@@ -216,11 +213,11 @@ int IotDataMqtt::subscribe(char* username, char* token) {
      *  #AWS_IOT_MQTT_MIN_RECONNECT_WAIT_INTERVAL
      *  #AWS_IOT_MQTT_MAX_RECONNECT_WAIT_INTERVAL
      */
-    rc = aws_iot_mqtt_autoreconnect_set_status(&client, true);
-    if(SUCCESS != rc) {
-        ESP_LOGE(TAG, "Unable to set Auto Reconnect to true - %d", rc);
-        abort();
-    }
+//    rc = aws_iot_mqtt_autoreconnect_set_status(&client, true);
+//    if(SUCCESS != rc) {
+//        ESP_LOGE(TAG, "Unable to set Auto Reconnect to true - %d", rc);
+ //       abort();
+  //  }
 	char topic[100];
     sprintf(topic,"$aws/things/%s/shadow/update/documents",thingData.thingName);
 
@@ -245,7 +242,8 @@ int IotDataMqtt::subscribe(char* username, char* token) {
     paramsQOS0.payloadLen = strlen(cPayload);
     
     bool first = true;
-    while((NETWORK_ATTEMPTING_RECONNECT == rc || NETWORK_RECONNECTED == rc || SUCCESS == rc)) {
+	done = false;
+    while(!done && (NETWORK_ATTEMPTING_RECONNECT == rc || NETWORK_RECONNECTED == rc || SUCCESS == rc)) {
 
         //Max time the yield function will wait for read messages
         rc = aws_iot_mqtt_yield(&client, 100);
@@ -265,10 +263,7 @@ int IotDataMqtt::subscribe(char* username, char* token) {
         }
         vTaskDelay(1000 / portTICK_RATE_MS);
     }
-
-    ESP_LOGE(TAG, "An error occurred in the main loop.");
-    abort();
-	return 1;
+	return 0;
 }
 
 int IotDataMqtt::close() {

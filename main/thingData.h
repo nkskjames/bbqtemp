@@ -2,8 +2,9 @@
 #define THINGDATA_H_
 
 
+#define THING_DATA_NUM 4
+
 typedef struct {
-    bool valid;
     double t[4];
 	double tu[4];
 	double tl[4];
@@ -14,10 +15,17 @@ typedef struct {
 	char username[64];
 } data_t;
 
+typedef struct {
+    double t[4];
+	double sent[4];
+} data_last_t;
+
 #ifdef __cplusplus
     extern "C" data_t thingData;
+    extern "C" data_last_t thingDataLast;
 #else
 	data_t thingData;
+	data_last_t thingDataLast;
 #endif
 
 #endif

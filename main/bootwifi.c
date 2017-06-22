@@ -22,13 +22,12 @@
 // then consider using semver to change the version number or else
 // we may try and boot with the wrong data.
 #define KEY_VERSION "version"
-uint32_t g_version=0x0200;
+uint32_t g_version=0x0400;
 
 #define KEY_CONNECTION_INFO "connectionInfo" // Key used in NVS for connection info
 #define BOOTWIFI_NAMESPACE "bootwifi" // Namespace in NVS for bootwifi
 
 
-static void saveConnectionInfo(connection_info_t *pConnectionInfo);
 static bootwifi_callback_t g_callback = NULL; // Callback function to be invoked when we have finished.
 
 static int g_mongooseStarted = 0; // Has the mongoose server started?
@@ -113,12 +112,10 @@ static char *mgStrToStr(struct mg_str mgStr) {
 	return retStr;
 } // mgStrToStr
 
-void get_thing_name(char* thingName) {
+void getThingName(char* thingName) {
     uint8_t mac[6];
-	char tmpName[255];
-    esp_efuse_read_mac(mac);
-    sprintf(tmpName,"%s_%02X%02X%02X%02X%02X%02X","BBQTemp",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);	
-	strcpy(thingName,tmpName);
+    esp_efuse_mac_get_default(mac);
+    sprintf(thingName,"BBQTemp_%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
 }
 
 /**
@@ -145,7 +142,7 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 //fix
 				saveConnectionInfo(&connectionInfo);
 				ESP_LOGD(tag, "- Set the new connection info to ssid: %s, password: %s",
-					connectionInfo.ssid, connectionInfo.password);
+					connectionInfo.ssid, connectionInfo.ssid_password);
 				mg_send_head(nc, 200, 0, "Content-Type: text/plain");
 			} 
 			if (strcmp(uri, "/") == 0) {
@@ -170,9 +167,11 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 				ESP_LOGD(tag, "- body: %.*s", message->body.len, message->body.p);
 				connection_info_t connectionInfo;
 				mg_get_http_var(&message->body, "ssid",	connectionInfo.ssid, SSID_SIZE);
+				mg_get_http_var(&message->body, "ssid_password", connectionInfo.ssid_password, SSID_PASSWORD_SIZE);
 				mg_get_http_var(&message->body, "password", connectionInfo.password, PASSWORD_SIZE);
-				mg_get_http_var(&message->body, "username", connectionInfo.username, USERNAME_SIZE);
-				mg_get_http_var(&message->body, "token", connectionInfo.token, 164);
+				mg_get_http_var(&message->body, "email", connectionInfo.email, EMAIL_SIZE);
+				mg_get_http_var(&message->body, "userid", connectionInfo.userid, USERID_SIZE);
+				mg_get_http_var(&message->body, "token", connectionInfo.token, TOKEN_SIZE);
 
 				char ipBuf[20];
 				if (mg_get_http_var(&message->body, "ip", ipBuf, sizeof(ipBuf)) > 0) {
@@ -195,8 +194,8 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 					connectionInfo.ipInfo.netmask.addr = 0;
 				}
 
-				ESP_LOGD(tag, "ssid: %s\npassword: %s\nusername: %s\ntoken: %s", connectionInfo.ssid, connectionInfo.password,connectionInfo.username,connectionInfo.token);
-				if (strlen(connectionInfo.ssid) == 0 || strlen(connectionInfo.username) == 0 || strlen(connectionInfo.token) == 0) {
+				ESP_LOGD(tag, "ssid: %s\npassword: %s\nemail: %s\ntoken: %s", connectionInfo.ssid, connectionInfo.password,connectionInfo.email,connectionInfo.token);
+				if (strlen(connectionInfo.ssid) == 0 || strlen(connectionInfo.email) == 0) {
 					ESP_LOGD(tag, "Field empty");
 					mg_send_head(nc, 300, 0, "Content-Type: text/plain");
 					//mg_send(nc, "error", 5);
@@ -207,7 +206,7 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 
 				
 				char thingName[255];
-				get_thing_name(thingName);
+				getThingName(thingName);
 				
 
 				char html_body[512];
@@ -215,7 +214,7 @@ static void mongoose_event_handler(struct mg_connection *nc, int ev, void *evDat
 				ESP_LOGD(tag, "Thing name: %s,%d",html_body,strlen(html_body));
 				mg_send_head(nc, 200, strlen(thingName), "Content-Type: text/plain");
 				mg_printf(nc, thingName, strlen(thingName));
-
+				connectionInfo.setup_done = 0;
 				saveConnectionInfo(&connectionInfo);
 				g_mongooseStopRequest = 1;
 				//bootWiFi2();
@@ -418,7 +417,7 @@ int getConnectionInfo(connection_info_t *pConnectionInfo) {
 /**
  * Save our connection info for retrieval on a subsequent restart.
  */
-static void saveConnectionInfo(connection_info_t *pConnectionInfo) {
+void saveConnectionInfo(connection_info_t *pConnectionInfo) {
 	nvs_handle handle;
 	ESP_ERROR_CHECK(nvs_open(BOOTWIFI_NAMESPACE, NVS_READWRITE, &handle));
 	ESP_ERROR_CHECK(nvs_set_blob(handle, KEY_CONNECTION_INFO, pConnectionInfo,
@@ -448,7 +447,7 @@ static void becomeStation(connection_info_t *pConnectionInfo) {
   wifi_config_t sta_config;
   sta_config.sta.bssid_set = 0;
   memcpy(sta_config.sta.ssid, pConnectionInfo->ssid, SSID_SIZE);
-  memcpy(sta_config.sta.password, pConnectionInfo->password, PASSWORD_SIZE);
+  memcpy(sta_config.sta.password, pConnectionInfo->ssid_password, SSID_PASSWORD_SIZE);
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
   ESP_ERROR_CHECK(esp_wifi_start());
   ESP_ERROR_CHECK(esp_wifi_connect());

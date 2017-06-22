@@ -21,7 +21,9 @@ class IotDataMqtt {
 	const char* HOST = CONFIG_AWS_IOT_MQTT_HOST;
 	uint32_t PORT = CONFIG_AWS_IOT_MQTT_PORT;
 	
+	
         public:
+	bool done;
 	int subscribe(char*,char*);
 	int close();
 	

@@ -12,23 +12,30 @@
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
+#include "aws_iot_log.h"
 #include <nvs.h>
 #include <nvs_flash.h>
 #include "driver/gpio.h"
 #include "driver/adc.h"
 #include "lwip/err.h"
 #include "apps/sntp/sntp.h"
+#include "cJSON.h"
+
+#include "soc/rtc_cntl_reg.h"
+#include "soc/sens_reg.h"
+#include "driver/rtc_io.h"
+#include "esp32/ulp.h"
+#include "ulp_main.h"
+
+#include "thingData.h"
+#include "IotSSL.hpp"
 
 extern "C" {
 #include "bootwifi.h"
 }
-#include "IotDataMqtt.hpp"
-#include "IotSSL.hpp"
-
-extern const char firebase_apikey_start[] asm("_binary_firebase_apikey_start");
-extern const char firebase_apikey_end[] asm("_binary_firebase_apikey_end");
 
 static const adc1_channel_t ADC_TEMP1 = ADC1_CHANNEL_7;
+static const adc1_channel_t ADC_TEMP2 = ADC1_CHANNEL_6;
 static const char *TAG = "main";
 static const int MAX_LENGTH_OF_UPDATE_JSON_BUFFER = 400;
 static const int ADC_NUM_STEPS = 4096;
@@ -41,6 +48,22 @@ static const double Ri = Ro * exp(-B/To);
 static const gpio_num_t CONFIG_RESET_GPIO = GPIO_NUM_0;
 static const float DELTA_TEMP = 2;
 
+extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
+extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
+
+/* This function is called once after power-on reset, to load ULP program into
+ * RTC memory and configure the ADC.
+ */
+static void init_ulp_program();
+
+/* This function is called every time before going into deep sleep.
+ * It starts the ULP program and resets measurement counter.
+ */
+static void start_ulp_program();
+
+
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -48,7 +71,6 @@ extern data_t thingData;
 #ifdef __cplusplus
 }
 #endif
-
 
 static void initialize_sntp(void)
 {
@@ -77,12 +99,6 @@ static void obtain_time(void)
     }
 }
 
-void getThingName(char* thingName) {
-    uint8_t mac[6];
-    esp_efuse_read_mac(mac);
-    sprintf(thingName,"BBQTemp_%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-}
-
 float getTemperature(adc1_channel_t channel) {
     int adc_value = adc1_get_voltage(channel);
     double adc_voltage = adc_value * ADC_STEP;
@@ -97,129 +113,68 @@ float getTemperature(adc1_channel_t channel) {
 	return temperature;
 }
 
-void subscribe_task(void *param) {
-    IotDataMqtt data;
-    thingData.valid = false;
-    connection_info_t connectionInfo;
-    getConnectionInfo(&connectionInfo);
-    data.subscribe(connectionInfo.username,connectionInfo.token);
-    vTaskDelete(NULL);
-}
 
 void sample_task(void *param) {
-    adc1_config_width(ADC_WIDTH_12Bit);
-    adc1_config_channel_atten(ADC_TEMP1,ADC_ATTEN_11db);
+	gpio_set_level(GPIO_NUM_5, 1);
+	char thingName[128];
+	IotSSL post;
+	char body[512];
+	char request[1024];
+	char response[1024];
+
+	getThingName(thingName);	
     connection_info_t connectionInfo;
     getConnectionInfo(&connectionInfo);
-    ESP_LOGI(TAG,"Username: %s",connectionInfo.username);    
-
-    int sample_num = 0;
-    time_t now = 0;
-    struct tm timeinfo;
-
-	double last_sent_temp[3] = {0,0,0};
-    double last_temp[3] = {0,0,0};
-    thingData.t[0] = 0;
-    thingData.t[1] = 0;
-    thingData.t[2] = 0;
-
-    thingData.tu[0] = 1000;
-    thingData.tu[1] = 1000;
-    thingData.tu[2] = 1000;
-
-    thingData.tl[0] = 0;
-    thingData.tl[1] = 0;
-    thingData.tl[2] = 0;
-
-	strcpy(thingData.td[0],"Temp 1");
-	strcpy(thingData.td[1],"Temp 2");
-	strcpy(thingData.td[2],"Temp 3");
-
-	strcpy(thingData.token,"");
-	strcpy(thingData.prettyName,"");
-	    
-    char response[512];
-    char request[1024];
-    char body[512];
-	//getTemperature(ADC_TEMP1);
-	char firebase_apikey[40];
-	strncpy(firebase_apikey,firebase_apikey_start,39);
-	firebase_apikey[39] = '\0';
-
-  	IotSSL post("fcm.googleapis.com","443");
-    post.init();
-    snprintf(body, 512, "{ \"collapse_key\": \"subscribed\", \"time_to_live\" : 120, \"to\" : \"%s\","
-			"\"data\" : { \"command\": \"subscribed\"  } }",connectionInfo.token);
-
-            ESP_LOGI(TAG,"Body: %s",(unsigned char*)body);
-            post.buildMessage(request,1024,firebase_apikey,body);
-            post.send((unsigned char*)request, (unsigned char*)response, 512);
-    
-
-    while (strlen(thingData.token) == 0) {
-        ESP_LOGI(TAG,"Waiting for publish");
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-
-    ESP_LOGI(TAG,"Start Sampling: %s,", firebase_apikey_start);
-    bool first = false;
-    for (sample_num = 0; sample_num<10; sample_num++) {
-	    ESP_LOGI(TAG,"Sample: %d",sample_num);    
-		time(&now);
-        localtime_r(&now, &timeinfo);
+	if (connectionInfo.setup_done == 0) {
+		post.init("bbqtest-c47a8.firebaseio.com","443");
+		int rc = post.connect();
+		int cnt = 0;
+		while(cnt < 20) {
+	        vTaskDelay(3000 / portTICK_PERIOD_MS);
+			snprintf(request, 1024, "GET /setup/%s.json HTTP/1.1\n"
+				"Host: bbqtest-c47a8.firebaseio.com\n"
+				"User-Agent: BBQTemp\n"
+				"Accept: */*\n\n",connectionInfo.userid);
+			post.sendRetry((unsigned char*)request, response, 1024, 3);
+			ESP_LOGI(TAG,"Response: %s",response);
+			if (strcmp(response,"\"1\"") == 0) {
+				ESP_LOGI(TAG,"Go flag set");
+				break;
+			}
+			cnt++;
+		}
+		if (cnt == 20) {
+			ESP_LOGI(TAG,"Timeout waiting for user device to set go flag");
+		    vTaskDelete(NULL);
+			return;
+		}
+		connectionInfo.setup_done = 1;
+		saveConnectionInfo(&connectionInfo);
+	} else {
+		post.init("us-central1-bbqtest-c47a8.cloudfunctions.net","443");
+		post.connect();
+		double t0 = getTemperature(ADC_TEMP1);
+		double t1 = 110.0;
+		double t2 = 1000.0;
 		
-		thingData.t[0] = getTemperature(ADC_TEMP1);
-        thingData.t[1] = thingData.t[1] + 10;
-        thingData.t[2] = thingData.t[2] + 100;
-
-		bool update = false;
-		for (int i=0;i<3;i++) {
-			if (abs(last_sent_temp[i]-thingData.t[i]) > DELTA_TEMP) {
-				update = true;
-			}
-		}
-		if (update) {
-			strcpy(thingData.prettyName,"a");
-            snprintf(body, 512, "{ \"collapse_key\": \"temperature\", \"time_to_live\" : 120, \"to\" : \"%s\","
-			"\"data\" : { \"t\": [%0.0f,%0.0f,%0.0f], \"tu\": [%0.0f,%0.0f,%0.0f], \"tl\": [%0.0f,%0.0f,%0.0f], \"td\": [\"%s\",\"%s\",\"%s\"],"
-			"\"thingName\" : \"%s\", \"prettyName\" : \"%s\", \"command\": \"data\"  } }",
-                                thingData.token,
-                                thingData.t[0],thingData.t[1],thingData.t[2],
-                                thingData.tu[0],thingData.tu[1],thingData.tu[2],
-                                thingData.tl[0],thingData.tl[1],thingData.tl[2],
-                                thingData.td[0],thingData.td[1],thingData.td[2],
-								thingData.thingName,thingData.prettyName);
-
-            ESP_LOGI(TAG,"Body: %s",(unsigned char*)body);
-            post.buildMessage(request,1024,firebase_apikey,body);
-            post.send((unsigned char*)request, (unsigned char*)response, 512);
-            ESP_LOGI(TAG,"Response: %s",(unsigned char*)response);
-			for (int i=0;i<3;i++) {
-				last_sent_temp[i] = thingData.t[i];
-			}
-		}
-        // Threshold checking
-        for (int i=0;i<3;i++) {
-            if (thingData.t[i] >= thingData.tu[i] && last_temp[i] < thingData.tu[i] && first) {
-				ESP_LOGI(TAG,"Over: %d",i);
-                snprintf(body, 512, "{\"to\" : \"%s\", \"notification\" : { \"body\" : \"Over Temp: %s\" }, \"priority\" : 10 }",thingData.token, thingData.td[i]);
-                post.buildMessage(request,1024,firebase_apikey,body);
-                post.send((unsigned char*)request, (unsigned char*)response, 512);
-            }
-            if (thingData.t[i] <= thingData.tl[i] && last_temp[i] > thingData.tl[i] && first) {
-				ESP_LOGI(TAG,"Under: %d",i);
-                snprintf(body, 512, "{\"to\" : \"%s\", \"notification\" : { \"body\" : \"Under Temp: %s\" }, \"priority\" : 10 }",thingData.token, thingData.td[i]);
-                post.buildMessage(request,1024,firebase_apikey,body);
-                post.send((unsigned char*)request, (unsigned char*)response, 512);
-            }
-			last_temp[i] = thingData.t[i];
-		}
-        first = true;
-	    vTaskDelay(3000 / portTICK_PERIOD_MS);
-    }
-    post.stop();
+		snprintf(body, 512, "{\"user_id\":\"%s\", \"thing_id\": \"%s\", \"t\": [%0.0f,%0.0f,%0.0f] }",connectionInfo.userid, thingName, t0, t1, t2);
+		snprintf(request, 1024, "POST /addDatapoint HTTP/1.1\n"
+				"Host: us-central1-bbqtest-c47a8.cloudfunctions.net\n"
+				"User-Agent: BBQTemp\n"
+				"Accept: */*\n"
+				"Connection: keep-alive\n"
+				"Content-Type: application/json\n"
+				"Content-length: %d\n\n"
+				"%s",
+				strlen(body), body);
+		post.sendRetry((unsigned char*)request, response, 1024, 3);
+	}
+	post.stop();
+	ESP_LOGI(TAG,"Sample done");	
     vTaskDelete(NULL);
 }
+
+
 
 void delayed_reboot_task(void *param) {
 	ESP_LOGI(TAG,"Delayed reboot");
@@ -237,9 +192,8 @@ void wifi_setup_done(int rc) {
     	xTaskCreate(&delayed_reboot_task, "delayed_reboot_task", 36*1024, NULL, 5, NULL);		
 	} else {
 	    //obtain_time();
-		xTaskCreate(&subscribe_task, "subscribe_task", 36*1024, NULL, 5, NULL);
+		//xTaskCreate(&subscribe_task, "subscribe_task", 36*1024, NULL, 5, NULL);
     	xTaskCreate(&sample_task, "sample_task", 48*1024, NULL, 4, NULL);
-
 	}
 
 }
@@ -249,35 +203,74 @@ void wifi_setup_done(int rc) {
  */
 static void clearConfig() {
 	nvs_handle handle;
-	
-	//TODO: use constants
-	nvs_open("mqtt", NVS_READWRITE, &handle);
-	nvs_erase_all(handle);
 	nvs_open("bootwifi", NVS_READWRITE, &handle);
 	nvs_erase_all(handle);
 	nvs_close(handle);
 }
 
+static void set_thresholds() {
+    int adc_value0 = adc1_get_voltage(ADC_TEMP1);
+    int adc_value1 = 11;
+	ESP_LOGI(TAG,"ADC Values = %d,%d",adc_value0,adc_value1);
+    adc1_ulp_enable();
+    ulp_low_thr0 = adc_value0-10;
+    ulp_high_thr0 = adc_value0+10;
+    ulp_low_thr1 = 0;
+    ulp_high_thr1 = 4096;
+
+}
+
+static void init_ulp_program()
+{
+    esp_err_t err = ulp_load_binary(0, ulp_main_bin_start,
+            (ulp_main_bin_end - ulp_main_bin_start) / sizeof(uint32_t));
+    ESP_ERROR_CHECK(err);
+
+    /* Configure ADC channel */
+    /* Note: when changing channel here, also change 'adc_channel' constant
+       in adc.S */
+    adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_11db);
+    adc1_config_width(ADC_WIDTH_12Bit);
+	set_thresholds();
+
+
+    /* Set ULP wake up period to 100ms */
+    ulp_set_wakeup_period(0, 100000);
+}
+
+static void start_ulp_program()
+{
+    /* Reset sample counter */
+    ulp_sample_counter = 0;
+
+    /* Start the program */
+    esp_err_t err = ulp_run((&ulp_entry0 - RTC_SLOW_MEM) / sizeof(uint32_t));
+    ESP_ERROR_CHECK(err);
+}
 
 
 extern "C" void app_main(void)
 {
     getThingName(thingData.thingName);
     
-    // Setup IO
+    adc1_config_width(ADC_WIDTH_12Bit);
+    adc1_config_channel_atten(ADC_TEMP1,ADC_ATTEN_11db);
+
 	gpio_pad_select_gpio(CONFIG_RESET_GPIO);
 	gpio_set_direction(CONFIG_RESET_GPIO, GPIO_MODE_INPUT);
 
     gpio_set_direction(GPIO_NUM_5, GPIO_MODE_OUTPUT);
-
+	gpio_set_level(GPIO_NUM_5, 0);
 
     // blink LED
+/*
     int level = 0;
     for (int c=0;c<10;c++) {
         gpio_set_level(GPIO_NUM_5, level);
         level = !level;
         vTaskDelay(300 / portTICK_PERIOD_MS);
     }
+*/
     //check reset button and clear config if pushed
 	nvs_flash_init();
     if (!gpio_get_level(CONFIG_RESET_GPIO)) {
@@ -286,9 +279,34 @@ extern "C" void app_main(void)
     }
     
     //Init Wifi; call callback when done
-    bootWiFi(wifi_setup_done);
+    //bootWiFi(wifi_setup_done);
 
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+	esp_deep_sleep_wakeup_cause_t cause = esp_deep_sleep_get_wakeup_cause();
+    if (cause != ESP_DEEP_SLEEP_WAKEUP_ULP) {
+        printf("Not ULP wakeup\n");
+        init_ulp_program();
+    } else {
+        printf("Deep sleep wakeup\n");
+        printf("ULP did %d measurements since last reset\n", ulp_sample_counter & UINT16_MAX);
+        printf("Thresholds:  low=%d  high=%d\n", ulp_low_thr0, ulp_high_thr0);
+        ulp_last_result0 &= UINT16_MAX;
+        printf("Value=%d was %s threshold\n", ulp_last_result0,
+                ulp_last_result0 < ulp_low_thr0 ? "below" : "above");
+
+       printf("Thresholds:  low=%d  high=%d\n", ulp_low_thr1, ulp_high_thr1);
+        ulp_last_result1 &= UINT16_MAX;
+        printf("Value=%d was %s threshold\n", ulp_last_result1,
+                ulp_last_result1 < ulp_low_thr1 ? "below" : "above");
+		set_thresholds();
+    }
+    printf("Entering deep sleep\n\n");
+    start_ulp_program();
+    ESP_ERROR_CHECK( esp_deep_sleep_enable_ulp_wakeup() );
+    esp_deep_sleep_start();
+
+
+    //vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     /*
     struct timeval now;
