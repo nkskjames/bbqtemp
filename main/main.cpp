@@ -27,26 +27,34 @@
 #include "esp32/ulp.h"
 #include "ulp_main.h"
 
-#include "thingData.h"
 #include "IotSSL.hpp"
 
 extern "C" {
 #include "bootwifi.h"
 }
 
+static const char *TAG = "main";
+
+// ADC channels
 static const adc1_channel_t ADC_TEMP1 = ADC1_CHANNEL_7;
 static const adc1_channel_t ADC_TEMP2 = ADC1_CHANNEL_6;
-static const char *TAG = "main";
-static const int MAX_LENGTH_OF_UPDATE_JSON_BUFFER = 400;
+
+//GPIO for reset config button
+static const gpio_num_t CONFIG_RESET_GPIO = GPIO_NUM_0;
+
+// ADC and probe constants
 static const int ADC_NUM_STEPS = 4096;
-static const double ADC_STEP = 3.3/ADC_NUM_STEPS;
+static const double ADC_RANGE = 3.3;
 static const int Ro = 100000;
 static const int Rt = 5950;
 static const int B = 3950;
 static const double To = 298.15;
+static const int ADC_WAKEUP_THRESHOLD = 20;
+static const int WAKE_PERIOD_SEC = 10;
+
+static const double ADC_STEP = ADC_RANGE/ADC_NUM_STEPS;
 static const double Ri = Ro * exp(-B/To);
-static const gpio_num_t CONFIG_RESET_GPIO = GPIO_NUM_0;
-static const float DELTA_TEMP = 2;
+static const int WAKE_PERIOD = WAKE_PERIOD_SEC * 1000000;
 
 extern const uint8_t ulp_main_bin_start[] asm("_binary_ulp_main_bin_start");
 extern const uint8_t ulp_main_bin_end[]   asm("_binary_ulp_main_bin_end");
@@ -60,17 +68,6 @@ static void init_ulp_program();
  * It starts the ULP program and resets measurement counter.
  */
 static void start_ulp_program();
-
-
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern data_t thingData;
-#ifdef __cplusplus
-}
-#endif
 
 static void initialize_sntp(void)
 {
@@ -99,8 +96,7 @@ static void obtain_time(void)
     }
 }
 
-float getTemperature(adc1_channel_t channel) {
-    int adc_value = adc1_get_voltage(channel);
+double convertTemperature(int adc_value) {
     double adc_voltage = adc_value * ADC_STEP;
 
     double R = (Rt * adc_voltage)/(3.3 - adc_voltage);
@@ -116,6 +112,7 @@ float getTemperature(adc1_channel_t channel) {
 
 void sample_task(void *param) {
 	gpio_set_level(GPIO_NUM_5, 1);
+
 	char thingName[128];
 	IotSSL post;
 	char body[512];
@@ -126,8 +123,10 @@ void sample_task(void *param) {
     connection_info_t connectionInfo;
     getConnectionInfo(&connectionInfo);
 	if (connectionInfo.setup_done == 0) {
+		// If Iot device has not been setup, wait for flag on server to be 
+		// set indicating server is prepared for new device
 		post.init("bbqtest-c47a8.firebaseio.com","443");
-		int rc = post.connect();
+		post.connect();
 		int cnt = 0;
 		while(cnt < 20) {
 	        vTaskDelay(3000 / portTICK_PERIOD_MS);
@@ -148,14 +147,28 @@ void sample_task(void *param) {
 		    vTaskDelete(NULL);
 			return;
 		}
+		post.stop();
 		connectionInfo.setup_done = 1;
 		saveConnectionInfo(&connectionInfo);
 	} else {
+		// IoT device is setup; take sample
+		int adc_value0 = adc1_get_voltage(ADC_TEMP1);
+		int adc_value1 = 10;
+		ESP_LOGI(TAG,"ADC Values = %d,%d",adc_value0,adc_value1);
+
+		// Set ulp wakeup thresholds		
+		ulp_low_thr0 = adc_value0 - ADC_WAKEUP_THRESHOLD;
+		ulp_high_thr0 = adc_value0 + ADC_WAKEUP_THRESHOLD;
+		ulp_low_thr1 = 0;
+		ulp_high_thr1 = 4096;
+
+		// convert adc values to temperatures
+		double t0 = convertTemperature(adc_value0);
+		double t1 = convertTemperature(adc_value1);
+		double t2 = 1000.0;
+
 		post.init("us-central1-bbqtest-c47a8.cloudfunctions.net","443");
 		post.connect();
-		double t0 = getTemperature(ADC_TEMP1);
-		double t1 = 110.0;
-		double t2 = 1000.0;
 		
 		snprintf(body, 512, "{\"user_id\":\"%s\", \"thing_id\": \"%s\", \"t\": [%0.0f,%0.0f,%0.0f] }",connectionInfo.userid, thingName, t0, t1, t2);
 		snprintf(request, 1024, "POST /addDatapoint HTTP/1.1\n"
@@ -168,8 +181,13 @@ void sample_task(void *param) {
 				"%s",
 				strlen(body), body);
 		post.sendRetry((unsigned char*)request, response, 1024, 3);
+		post.stop();
+
+		printf("Entering deep sleep\n\n");
+		start_ulp_program();
+		ESP_ERROR_CHECK( esp_deep_sleep_enable_ulp_wakeup() );
+		esp_deep_sleep_start();
 	}
-	post.stop();
 	ESP_LOGI(TAG,"Sample done");	
     vTaskDelete(NULL);
 }
@@ -185,17 +203,12 @@ void delayed_reboot_task(void *param) {
 
 void wifi_setup_done(int rc) {
     printf("Wifi setup done\n");
-
-//  xTaskCreate(&https_get_task, "https_get_task", 8192, NULL, 5, NULL);
-
 	if (rc == 2) {
     	xTaskCreate(&delayed_reboot_task, "delayed_reboot_task", 36*1024, NULL, 5, NULL);		
 	} else {
 	    //obtain_time();
-		//xTaskCreate(&subscribe_task, "subscribe_task", 36*1024, NULL, 5, NULL);
     	xTaskCreate(&sample_task, "sample_task", 48*1024, NULL, 4, NULL);
 	}
-
 }
 
 /**
@@ -208,40 +221,23 @@ static void clearConfig() {
 	nvs_close(handle);
 }
 
-static void set_thresholds() {
-    int adc_value0 = adc1_get_voltage(ADC_TEMP1);
-    int adc_value1 = 11;
-	ESP_LOGI(TAG,"ADC Values = %d,%d",adc_value0,adc_value1);
-    adc1_ulp_enable();
-    ulp_low_thr0 = adc_value0-10;
-    ulp_high_thr0 = adc_value0+10;
-    ulp_low_thr1 = 0;
-    ulp_high_thr1 = 4096;
-
-}
-
 static void init_ulp_program()
 {
     esp_err_t err = ulp_load_binary(0, ulp_main_bin_start,
             (ulp_main_bin_end - ulp_main_bin_start) / sizeof(uint32_t));
     ESP_ERROR_CHECK(err);
 
-    /* Configure ADC channel */
-    /* Note: when changing channel here, also change 'adc_channel' constant
-       in adc.S */
+	// ADC channel here must match channel defined in adc.S
     adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_11db);
     adc1_config_width(ADC_WIDTH_12Bit);
-	set_thresholds();
-
-
-    /* Set ULP wake up period to 100ms */
-    ulp_set_wakeup_period(0, 100000);
+    ulp_set_wakeup_period(0, WAKE_PERIOD);
 }
 
 static void start_ulp_program()
 {
     /* Reset sample counter */
     ulp_sample_counter = 0;
+	adc1_ulp_enable();
 
     /* Start the program */
     esp_err_t err = ulp_run((&ulp_entry0 - RTC_SLOW_MEM) / sizeof(uint32_t));
@@ -251,11 +247,6 @@ static void start_ulp_program()
 
 extern "C" void app_main(void)
 {
-    getThingName(thingData.thingName);
-    
-    adc1_config_width(ADC_WIDTH_12Bit);
-    adc1_config_channel_atten(ADC_TEMP1,ADC_ATTEN_11db);
-
 	gpio_pad_select_gpio(CONFIG_RESET_GPIO);
 	gpio_set_direction(CONFIG_RESET_GPIO, GPIO_MODE_INPUT);
 
@@ -278,10 +269,6 @@ extern "C" void app_main(void)
         clearConfig();
     }
     
-    //Init Wifi; call callback when done
-    //bootWiFi(wifi_setup_done);
-
-
 	esp_deep_sleep_wakeup_cause_t cause = esp_deep_sleep_get_wakeup_cause();
     if (cause != ESP_DEEP_SLEEP_WAKEUP_ULP) {
         printf("Not ULP wakeup\n");
@@ -298,24 +285,8 @@ extern "C" void app_main(void)
         ulp_last_result1 &= UINT16_MAX;
         printf("Value=%d was %s threshold\n", ulp_last_result1,
                 ulp_last_result1 < ulp_low_thr1 ? "below" : "above");
-		set_thresholds();
+
     }
-    printf("Entering deep sleep\n\n");
-    start_ulp_program();
-    ESP_ERROR_CHECK( esp_deep_sleep_enable_ulp_wakeup() );
-    esp_deep_sleep_start();
-
-
-    //vTaskDelay(1000 / portTICK_PERIOD_MS);
-
-    /*
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    int sleep_time_ms = (now.tv_sec - sleep_enter_time.tv_sec) * 1000 + (now.tv_usec - sleep_enter_time.tv_usec) / 1000;
-    const int wakeup_time_sec = 20;
-    printf("Enabling timer wakeup, %ds\n", wakeup_time_sec);
-    esp_deep_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000);
-    */
-
+	bootWiFi(wifi_setup_done);
 }
 

@@ -164,7 +164,7 @@ int IotSSL::connect() {
 	} else {
 */
 		ESP_LOGI(TAG," Server Verification skipped\n");
-		ret = 0;
+		ret = SUCCESS;
 //	}
 
 	mbedtls_ssl_conf_read_timeout(&conf, 1000);
