@@ -33,6 +33,6 @@ include $(IDF_PATH)/components/ulp/component_ulp_common.mk
 #
 
 CFLAGS += -D LOG_LOCAL_LEVEL=ESP_LOG_DEBUG
-COMPONENT_EMBED_TXTFILES := certs/aws-root-ca.pem certs/certificate.pem.crt certs/private.pem.key certs/certificate-and-ca.pem.crt certs/server_root_cert.pem certs/firebase.apikey
+COMPONENT_EMBED_TXTFILES := certs/certificate.pem.crt certs/private.pem.key certs/certificate-and-ca.pem.crt certs/server_root_cert.pem
 
 
