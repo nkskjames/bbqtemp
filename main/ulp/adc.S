@@ -1,21 +1,3 @@
-/* ULP Example: using ADC in deep sleep
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-
-   This file contains assembly code which runs on the ULP.
-
-   ULP wakes up to run this code at a certain period, determined by the values
-   in SENS_ULP_CP_SLEEP_CYCx_REG registers. On each wake up, the program
-   measures input voltage on the given ADC channel 'adc_oversampling_factor'
-   times. Measurements are accumulated and average value is calculated.
-   Average value is compared to the two thresholds: 'low_thr' and 'high_thr'.
-   If the value is less than 'low_thr' or more than 'high_thr', ULP wakes up
-   the chip from deep sleep.
-*/
 
 /* ULP assembly files are passed through C preprocessor first, so include directives
    and C macros may be used in these files 
